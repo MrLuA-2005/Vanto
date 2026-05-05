@@ -1,4 +1,4 @@
-name: Build Vantom Kernel (Sledgehammer Hook Mode)
+name: Build Vantom Kernel (Kprobes Auto-Hook Mode)
 on:
   workflow_dispatch:
 
@@ -18,22 +18,11 @@ jobs:
         run: |
           git clone https://github.com/vantoman/kernel_xiaomi_sm6150.git -b 14 kernel_source
 
-      - name: Integrate KSUN-Next & Failsafe Hooks
+      - name: Integrate KSUN-Next
         run: |
           cd kernel_source
-          # 1. Install KSUN Legacy
+          # 1. Install KSUN Legacy (No manual hooks needed, we will use Kprobes!)
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
-          
-          # 2. Sledgehammer Hook Injection
-          # These patterns are much broader to ensure they hit the correct C functions
-          sed -i '/search_binary_handler/i \    ksu_handle_execveat(&bprm->fd, &bprm->filename, &bprm->flags);' fs/exec.c
-          sed -i '/vfs_read(file, buf, count, pos);/i \    ksu_handle_vfs_read(file, buf, count, pos);' fs/read_write.c
-          sed -i '/faccessat(dfd, filename, mode, flags);/i \    ksu_handle_faccessat(&dfd, &filename, &mode, &flags);' fs/open.c
-          sed -i '/vfs_statx(dfd, filename, flags, &stat, lookup_flags);/i \    ksu_handle_stat(&dfd, &filename, &flags);' fs/stat.c
-          
-          # 3. Force define the legacy hooks for the Kconfig
-          echo "obj-y += kernelsu/" >> drivers/Makefile
-          echo "ccflags-y += -DCONFIG_KSU_MANUAL_HOOKS" >> drivers/kernelsu/Makefile
 
       - name: Integrate SusFS (With Auto-Fix)
         run: |
@@ -59,14 +48,14 @@ jobs:
           with open("fs/proc/task_mmu.c", "w") as f: f.writelines(lines)
           '
 
-      - name: Configure Kernel
+      - name: Configure Kernel (Enable Kprobes)
         run: |
           cd kernel_source
           REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sweet*defconfig" | head -n 1)
           [ -z "$REAL_DEFCONFIG" ] && REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sm6150*defconfig" | head -n 1)
           
-          # Injection Feature Flags
-          for flag in CONFIG_KSU CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_XIAOMI_LN8000 CONFIG_BQ2597X; do
+          # Injection Feature Flags & KPROBES
+          for flag in CONFIG_KSU CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_XIAOMI_LN8000 CONFIG_BQ2597X CONFIG_KPROBES CONFIG_HAVE_KPROBES CONFIG_KPROBE_EVENTS; do
             echo "$flag=y" >> $REAL_DEFCONFIG
           done
           echo "CONFIG_KSU_SUSFS_ENABLE_LOG=n" >> $REAL_DEFCONFIG
