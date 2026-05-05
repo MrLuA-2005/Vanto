@@ -1,4 +1,4 @@
-name: Build Vantom Kernel (Manual Hooks Mode)
+name: Build Vantom Kernel (Hook-Fix Mode)
 on:
   workflow_dispatch:
 
@@ -18,21 +18,22 @@ jobs:
         run: |
           git clone https://github.com/vantoman/kernel_xiaomi_sm6150.git -b 14 kernel_source
 
-      - name: Integrate KSUN-Next & Manual Hooks
+      - name: Integrate KSUN-Next & Failsafe Hooks
         run: |
           cd kernel_source
           # 1. Install KSUN Legacy
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
           
-          # 2. Add Manual Hooks for 4.14 (Crucial for KSUN-Next)
-          # Hook into fs/exec.c
-          sed -i '/search_binary_handler(bprm);/i \ \ \ \ ksu_handle_execveat(&bprm->fd, &bprm->filename, &bprm->flags);' fs/exec.c
-          # Hook into fs/open.c
-          sed -i '/return do_entry_open(f, finish_open, op);/i \ \ \ \ ksu_handle_faccessat(&dfd, &filename, &mode, &flags);' fs/open.c
-          # Hook into fs/read_write.c
-          sed -i '/if (unlikely(ret < 0))/i \ \ \ \ ksu_handle_vfs_read(file, buf, count, pos);' fs/read_write.c
-          # Hook into fs/stat.c
-          sed -i '/if (!error)/i \ \ \ \ ksu_handle_stat(&dfd, &filename, &flags);' fs/stat.c
+          # 2. Manual Hook Injection for Kernel 4.14
+          # We use a broader approach to ensure these hit the right spot
+          sed -i '/search_binary_handler(bprm);/i \    ksu_handle_execveat(&bprm->fd, &bprm->filename, &bprm->flags);' fs/exec.c
+          sed -i '/do_entry_open(f, finish_open, op);/i \    ksu_handle_faccessat(&dfd, &filename, &mode, &flags);' fs/open.c
+          sed -i '/if (unlikely(ret < 0))/i \    ksu_handle_vfs_read(file, buf, count, pos);' fs/read_write.c
+          sed -i '/if (!error)/i \    ksu_handle_stat(&dfd, &filename, &flags);' fs/stat.c
+          
+          # 3. Define the hooks so Kbuild is satisfied
+          echo "ccflags-y += -DKSU_EXPECTED_SIZE=0x3e6" >> drivers/kernelsu/Makefile
+          echo "ccflags-y += -DKSU_EXPECTED_HASH=0x79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821bf7" >> drivers/kernelsu/Makefile
 
       - name: Integrate SusFS (With Auto-Fix)
         run: |
@@ -46,7 +47,7 @@ jobs:
           # Fix cmdline.c
           if [ -f "fs/proc/cmdline.c.rej" ] || ! grep -q "susfs.h" fs/proc/cmdline.c; then
               sed -i '1i #include <linux/susfs.h>' fs/proc/cmdline.c
-              sed -i '/seq_puts(m, saved_command_line);/i \t#ifdef CONFIG_KSU_SUSFS\n\tsusfs_modify_cmdline(&saved_command_line);\n\t#endif' fs/proc/cmdline.c
+              sed -i '/seq_puts(m, saved_command_line);/i \	#ifdef CONFIG_KSU_SUSFS\n\tsusfs_modify_cmdline(&saved_command_line);\n\t#endif' fs/proc/cmdline.c
           fi
           
           # Fix task_mmu.c
@@ -62,7 +63,7 @@ jobs:
           '
           fi
 
-      - name: Configure Kernel (Dynamic Hunter)
+      - name: Configure Kernel
         run: |
           cd kernel_source
           REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sweet*defconfig" | head -n 1)
@@ -94,10 +95,10 @@ jobs:
           cp kernel_source/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
           cd AnyKernel3
           sed -i 's/device.name1=.*/device.name1=sweet/' anykernel.sh
-          zip -r ../Vantom-Sweet-Final.zip *
+          zip -r ../Vantom-Sweet-Kernel.zip *
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Vantom-Sweet-Final
-          path: Vantom-Sweet-Final.zip
+          name: Vantom-Sweet-Kernel
+          path: Vantom-Sweet-Kernel.zip
