@@ -63,7 +63,7 @@ jobs:
           echo "CONFIG_XIAOMI_LN8000=y" >> sweet_user_defconfig
           echo "CONFIG_BQ2597X=y" >> sweet_user_defconfig
           
-          # Fix for blank CPU Masks on Snapdragon 732G (sm6150)
+          # Hardcode CPU Masks just in case the default is blank
           echo 'CONFIG_LITTLE_CPU_MASK="0-5"' >> sweet_user_defconfig
           echo 'CONFIG_BIG_CPU_MASK="6-7"' >> sweet_user_defconfig
           
@@ -84,8 +84,8 @@ jobs:
           # 1. Load the device configuration
           make O=out vendor/sweet_user_defconfig
           
-          # 2. Bypass Interactive Prompts (Accept defaults for any missing variables)
-          yes "" | make O=out ARCH=arm64 CC=clang oldconfig
+          # 2. olddefconfig completely prevents infinite loops by auto-answering questions
+          make O=out ARCH=arm64 CC=clang olddefconfig
           
           # 3. Build the kernel
           make -j$(nproc) O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
