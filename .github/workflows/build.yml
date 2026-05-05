@@ -1,4 +1,4 @@
-name: Build Vantom Kernel (Hook-Fix Mode)
+name: Build Vantom Kernel (Sledgehammer Hook Mode)
 on:
   workflow_dispatch:
 
@@ -24,16 +24,16 @@ jobs:
           # 1. Install KSUN Legacy
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
           
-          # 2. Manual Hook Injection for Kernel 4.14
-          # We use a broader approach to ensure these hit the right spot
-          sed -i '/search_binary_handler(bprm);/i \    ksu_handle_execveat(&bprm->fd, &bprm->filename, &bprm->flags);' fs/exec.c
-          sed -i '/do_entry_open(f, finish_open, op);/i \    ksu_handle_faccessat(&dfd, &filename, &mode, &flags);' fs/open.c
-          sed -i '/if (unlikely(ret < 0))/i \    ksu_handle_vfs_read(file, buf, count, pos);' fs/read_write.c
-          sed -i '/if (!error)/i \    ksu_handle_stat(&dfd, &filename, &flags);' fs/stat.c
+          # 2. Sledgehammer Hook Injection
+          # These patterns are much broader to ensure they hit the correct C functions
+          sed -i '/search_binary_handler/i \    ksu_handle_execveat(&bprm->fd, &bprm->filename, &bprm->flags);' fs/exec.c
+          sed -i '/vfs_read(file, buf, count, pos);/i \    ksu_handle_vfs_read(file, buf, count, pos);' fs/read_write.c
+          sed -i '/faccessat(dfd, filename, mode, flags);/i \    ksu_handle_faccessat(&dfd, &filename, &mode, &flags);' fs/open.c
+          sed -i '/vfs_statx(dfd, filename, flags, &stat, lookup_flags);/i \    ksu_handle_stat(&dfd, &filename, &flags);' fs/stat.c
           
-          # 3. Define the hooks so Kbuild is satisfied
-          echo "ccflags-y += -DKSU_EXPECTED_SIZE=0x3e6" >> drivers/kernelsu/Makefile
-          echo "ccflags-y += -DKSU_EXPECTED_HASH=0x79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821bf7" >> drivers/kernelsu/Makefile
+          # 3. Force define the legacy hooks for the Kconfig
+          echo "obj-y += kernelsu/" >> drivers/Makefile
+          echo "ccflags-y += -DCONFIG_KSU_MANUAL_HOOKS" >> drivers/kernelsu/Makefile
 
       - name: Integrate SusFS (With Auto-Fix)
         run: |
@@ -44,16 +44,13 @@ jobs:
           
           patch -p1 --forward < susfs_source/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
           
-          # Fix cmdline.c
-          if [ -f "fs/proc/cmdline.c.rej" ] || ! grep -q "susfs.h" fs/proc/cmdline.c; then
-              sed -i '1i #include <linux/susfs.h>' fs/proc/cmdline.c
-              sed -i '/seq_puts(m, saved_command_line);/i \	#ifdef CONFIG_KSU_SUSFS\n\tsusfs_modify_cmdline(&saved_command_line);\n\t#endif' fs/proc/cmdline.c
-          fi
+          # Auto-Fix cmdline.c
+          sed -i '1i #include <linux/susfs.h>' fs/proc/cmdline.c
+          sed -i '/seq_puts(m, saved_command_line);/i \    #ifdef CONFIG_KSU_SUSFS\n    susfs_modify_cmdline(&saved_command_line);\n    #endif' fs/proc/cmdline.c
           
-          # Fix task_mmu.c
-          if [ -f "fs/proc/task_mmu.c.rej" ] || ! grep -q "susfs.h" fs/proc/task_mmu.c; then
-              sed -i '1i #include <linux/susfs.h>' fs/proc/task_mmu.c
-              python3 -c '
+          # Auto-Fix task_mmu.c
+          sed -i '1i #include <linux/susfs.h>' fs/proc/task_mmu.c
+          python3 -c '
           with open("fs/proc/task_mmu.c", "r") as f: lines = f.readlines()
           for i, line in enumerate(lines):
               if "static int show_map_vma(" in line:
@@ -61,7 +58,6 @@ jobs:
                   break
           with open("fs/proc/task_mmu.c", "w") as f: f.writelines(lines)
           '
-          fi
 
       - name: Configure Kernel
         run: |
@@ -69,12 +65,10 @@ jobs:
           REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sweet*defconfig" | head -n 1)
           [ -z "$REAL_DEFCONFIG" ] && REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sm6150*defconfig" | head -n 1)
           
-          echo "CONFIG_XIAOMI_LN8000=y" >> $REAL_DEFCONFIG
-          echo "CONFIG_BQ2597X=y" >> $REAL_DEFCONFIG
-          echo "CONFIG_KSU=y" >> $REAL_DEFCONFIG
-          echo "CONFIG_KSU_SUSFS=y" >> $REAL_DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $REAL_DEFCONFIG
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $REAL_DEFCONFIG
+          # Injection Feature Flags
+          for flag in CONFIG_KSU CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_XIAOMI_LN8000 CONFIG_BQ2597X; do
+            echo "$flag=y" >> $REAL_DEFCONFIG
+          done
           echo "CONFIG_KSU_SUSFS_ENABLE_LOG=n" >> $REAL_DEFCONFIG
           
           TARGET_DEFCONFIG=$(echo $REAL_DEFCONFIG | sed 's|arch/arm64/configs/||')
@@ -89,14 +83,14 @@ jobs:
           make O=out ARCH=arm64 CC=clang $TARGET_DEFCONFIG
           make -j$(nproc) O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
 
-      - name: Package Kernel (AnyKernel3)
+      - name: Package & Upload
         run: |
           git clone https://github.com/osm0sis/AnyKernel3.git
           cp kernel_source/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
           cd AnyKernel3
           sed -i 's/device.name1=.*/device.name1=sweet/' anykernel.sh
           zip -r ../Vantom-Sweet-Kernel.zip *
-
+      
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
