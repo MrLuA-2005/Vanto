@@ -1,63 +1,75 @@
-name: Build Vantom Kernel (Manual Stable Mode)
+name: Build Vantom Kernel (Manual Stable + SusFS 2.1.0)
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Allows manual trigger from Actions tab
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Build Tools
+      - name: Setup Build Environment
         run: |
           sudo apt update
-          sudo apt install -y bc bison build-essential flex git-lfs libssl-dev libelf-dev clang lld llvm
+          sudo apt install -y bc bison build-essential flex git-lfs libssl-dev libelf-dev clang lld llvm curl git
 
       - name: Clone Vantom Kernel
         run: |
-          # Clones the modern Vantom source for sweet (Snapdragon 732G)
+          # Clones Vantom source for sweet (Snapdragon 732G)
           git clone https://github.com/vantoman/kernel_xiaomi_sm6150.git -b 14 kernel_source
 
-      - name: Integrate KSUN & SusFS 2.1.0
+      - name: Integrate KernelSU-Next (Legacy)
         run: |
           cd kernel_source
-          # 1. Install KernelSU-Next (Legacy branch for 4.14 kernel)
+          # Installs KSUN v3.2.0-legacy optimized for 4.14 kernels
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+
+      - name: Integrate SusFS (v2.1.0 Compatible)
+        run: |
+          cd kernel_source
+          # Clones the stable 4.14 branch which supports modern SusFS features
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 susfs_source
           
-          # 2. Apply SusFS v2.1.0 (Latest 2026 NON-GKI patch)
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14-v2.1.0 susfs_source
+          # Copy SusFS core files to kernel tree
           cp -r susfs_source/kernel_patches/fs/* fs/
           cp -r susfs_source/kernel_patches/include/linux/* include/linux/
+          
+          # Apply the 4.14 specific patch
           patch -p1 < susfs_source/kernel_patches/50_add_susfs_in_kernel-4.14.patch
 
-      - name: Manual Mode Hardware Config
+      - name: Configure Hardware & Stealth
         run: |
-          # Navigate to the config file for your device
           cd kernel_source/arch/arm64/configs/vendor/
-          
-          # Enable LN8000 Charging Drivers for Sweet
+          # --- Hardware Drivers ---
           echo "CONFIG_XIAOMI_LN8000=y" >> sweet_user_defconfig
           echo "CONFIG_BQ2597X=y" >> sweet_user_defconfig
           
-          # Manual Mode Feature Flags (Stable Stealth)
+          # --- Manual Mode Stealth Flags ---
           echo "CONFIG_KSU=y" >> sweet_user_defconfig
           echo "CONFIG_KSU_SUSFS=y" >> sweet_user_defconfig
           echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> sweet_user_defconfig
           echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> sweet_user_defconfig
-          # We omit AUTO_ADD_SUS_KSTAT for better stability in Manual Mode
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=n" >> sweet_user_defconfig
 
-      - name: Final Build
+      - name: Build Kernel
         run: |
           cd kernel_source
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          # Build using Clang toolchain
+          # Build with AOSP Clang
           make O=out vendor/sweet_user_defconfig
           make -j$(nproc) O=out CC=clang
 
-      - name: Upload Kernel Image
+      - name: Package with AnyKernel3
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git
+          cp kernel_source/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          cd AnyKernel3
+          # Configure for sweet
+          sed -i 's/device.name1=.*/device.name1=sweet/' anykernel.sh
+          sed -i 's/device.name2=.*/device.name2=sweet_pro/' anykernel.sh
+          zip -r ../Vantom-Manual-KSUN-SusFS.zip *
+
+      - name: Upload Final ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: Vantom-Manual-Stable-Kernel
-          path: kernel_source/out/arch/arm64/boot/Image.gz-dtb
+          name: Vantom-Sweet-Kernel-Flashable
+          path: Vantom-Manual-KSUN-SusFS.zip
