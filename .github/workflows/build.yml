@@ -1,4 +1,4 @@
-name: Build Vantom Kernel
+name: Build Vantom Kernel (KSUN v3.2.0 + SusFS v2.1.0)
 on:
   workflow_dispatch:
 
@@ -18,33 +18,39 @@ jobs:
         run: |
           git clone https://github.com/vantoman/kernel_xiaomi_sm6150.git -b 14 kernel_source
 
-      - name: Integrate KernelSU-Next & SUSFS
+      - name: Integrate KernelSU-Next & SusFS v2.1.0
         run: |
           cd kernel_source
-          # 1. Install KSUN (Corrected URL to use 'next' branch)
+          # 1. Install KSUN Next with Legacy flag for 4.14
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
           
-          # 2. Apply SUSFS Patch (Cloning specific 4.14 branch for 'sweet')
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 susfs4ksu
-          cp susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch .
-          cp -r susfs4ksu/kernel_patches/fs/* fs/
-          cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
-          patch -p1 < 50_add_susfs_in_kernel-4.14.patch
+          # 2. Apply SusFS v2.1.0 Patches (NON-GKI)
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14-v2.1.0 susfs_source
           
-          # 3. Add Config Flags
-          echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/sweet_user_defconfig
-          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vendor/sweet_user_defconfig
+          # Copy SusFS core files to kernel tree
+          cp -r susfs_source/kernel_patches/fs/* fs/
+          cp -r susfs_source/kernel_patches/include/linux/* include/linux/
+          
+          # Apply the 4.14 specific patch
+          patch -p1 < susfs_source/kernel_patches/50_add_susfs_in_kernel-4.14.patch
 
-      - name: Build Kernel
+      - name: Configure and Build
         run: |
           cd kernel_source
+          # Enable Config Flags for KSUN and SusFS v2.x
+          echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/sweet_user_defconfig
+          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vendor/sweet_user_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> arch/arm64/configs/vendor/sweet_user_defconfig
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> arch/arm64/configs/vendor/sweet_user_defconfig
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> arch/arm64/configs/vendor/sweet_user_defconfig
+          
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           make O=out vendor/sweet_user_defconfig
           make -j$(nproc) O=out CC=clang
 
-      - name: Upload Kernel Image
+      - name: Upload Flashable Image
         uses: actions/upload-artifact@v4
         with:
-          name: Vantom-KSUN-SUSFS-Image
+          name: Vantom-KSUN-SusFS-2.1.0
           path: kernel_source/out/arch/arm64/boot/Image.gz-dtb
