@@ -1,6 +1,6 @@
 name: Build Vantom Kernel
 on:
-  workflow_dispatch: # Allows you to start the build manually
+  workflow_dispatch:
 
 jobs:
   build:
@@ -17,9 +17,8 @@ jobs:
       - name: Clone Vantom Kernel
         run: |
           git clone https://github.com/vantoman/kernel_xiaomi_sm6150.git -b 14 kernel_source
-          cd kernel_source
 
-- name: Integrate KernelSU-Next & SUSFS
+      - name: Integrate KernelSU-Next & SUSFS
         run: |
           cd kernel_source
           # 1. Install KSUN (Corrected URL to use 'next' branch)
