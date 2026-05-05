@@ -19,16 +19,17 @@ jobs:
           git clone https://github.com/vantoman/kernel_xiaomi_sm6150.git -b 14 kernel_source
           cd kernel_source
 
-      - name: Integrate KernelSU-Next & SUSFS
+- name: Integrate KernelSU-Next & SUSFS
         run: |
           cd kernel_source
-          # 1. Install KSUN
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/main/kernel/setup.sh" | bash -
+          # 1. Install KSUN (Corrected URL to use 'next' branch)
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
           
-          # 2. Apply SUSFS Patch (AI Note: Using 4.14 legacy patch for Sweet)
-          # We'll use a pre-patched SUSFS script for ease
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git
+          # 2. Apply SUSFS Patch (Cloning specific 4.14 branch for 'sweet')
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 susfs4ksu
           cp susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.14.patch .
+          cp -r susfs4ksu/kernel_patches/fs/* fs/
+          cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
           patch -p1 < 50_add_susfs_in_kernel-4.14.patch
           
           # 3. Add Config Flags
