@@ -1,4 +1,4 @@
-name: Build Vantom Kernel (Ghost-Fix Mode)
+name: Build Vantom Kernel (Manual Hooks Mode)
 on:
   workflow_dispatch:
 
@@ -18,31 +18,39 @@ jobs:
         run: |
           git clone https://github.com/vantoman/kernel_xiaomi_sm6150.git -b 14 kernel_source
 
-      - name: Integrate KSUN & SusFS (With Auto-Fix)
+      - name: Integrate KSUN-Next & Manual Hooks
         run: |
           cd kernel_source
-          
-          # 1. Install KernelSU-Next Legacy
+          # 1. Install KSUN Legacy
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
           
-          # 2. Clone SusFS 4.14
+          # 2. Add Manual Hooks for 4.14 (Crucial for KSUN-Next)
+          # Hook into fs/exec.c
+          sed -i '/search_binary_handler(bprm);/i \ \ \ \ ksu_handle_execveat(&bprm->fd, &bprm->filename, &bprm->flags);' fs/exec.c
+          # Hook into fs/open.c
+          sed -i '/return do_entry_open(f, finish_open, op);/i \ \ \ \ ksu_handle_faccessat(&dfd, &filename, &mode, &flags);' fs/open.c
+          # Hook into fs/read_write.c
+          sed -i '/if (unlikely(ret < 0))/i \ \ \ \ ksu_handle_vfs_read(file, buf, count, pos);' fs/read_write.c
+          # Hook into fs/stat.c
+          sed -i '/if (!error)/i \ \ \ \ ksu_handle_stat(&dfd, &filename, &flags);' fs/stat.c
+
+      - name: Integrate SusFS (With Auto-Fix)
+        run: |
+          cd kernel_source
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 susfs_source
           cp -r susfs_source/kernel_patches/fs/* fs/
           cp -r susfs_source/kernel_patches/include/linux/* include/linux/
           
-          # 3. Apply patch safely
           patch -p1 --forward < susfs_source/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
           
-          # 4. AUTO-FIX: Inject missing stealth code into cmdline.c
+          # Fix cmdline.c
           if [ -f "fs/proc/cmdline.c.rej" ] || ! grep -q "susfs.h" fs/proc/cmdline.c; then
-              echo "Fixing cmdline.c..."
               sed -i '1i #include <linux/susfs.h>' fs/proc/cmdline.c
               sed -i '/seq_puts(m, saved_command_line);/i \t#ifdef CONFIG_KSU_SUSFS\n\tsusfs_modify_cmdline(&saved_command_line);\n\t#endif' fs/proc/cmdline.c
           fi
           
-          # 5. AUTO-FIX: Inject missing stealth code into task_mmu.c using Python
+          # Fix task_mmu.c
           if [ -f "fs/proc/task_mmu.c.rej" ] || ! grep -q "susfs.h" fs/proc/task_mmu.c; then
-              echo "Fixing task_mmu.c..."
               sed -i '1i #include <linux/susfs.h>' fs/proc/task_mmu.c
               python3 -c '
           with open("fs/proc/task_mmu.c", "r") as f: lines = f.readlines()
@@ -54,22 +62,12 @@ jobs:
           '
           fi
 
-      - name: Configure Kernel (Dynamic Defconfig Hunter)
+      - name: Configure Kernel (Dynamic Hunter)
         run: |
           cd kernel_source
+          REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sweet*defconfig" | head -n 1)
+          [ -z "$REAL_DEFCONFIG" ] && REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sm6150*defconfig" | head -n 1)
           
-          # 1. Hunt for the REAL configuration file for the Redmi Note 10 Pro (sweet)
-          REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sweet*defconfig" | grep -iE "perf|user" | head -n 1)
-          if [ -z "$REAL_DEFCONFIG" ]; then
-              REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sweet*defconfig" | head -n 1)
-          fi
-          if [ -z "$REAL_DEFCONFIG" ]; then
-              REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sm6150*defconfig" | head -n 1)
-          fi
-          
-          echo "Found the true configuration file at: $REAL_DEFCONFIG"
-          
-          # 2. Inject our custom features directly into the real file
           echo "CONFIG_XIAOMI_LN8000=y" >> $REAL_DEFCONFIG
           echo "CONFIG_BQ2597X=y" >> $REAL_DEFCONFIG
           echo "CONFIG_KSU=y" >> $REAL_DEFCONFIG
@@ -78,7 +76,6 @@ jobs:
           echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $REAL_DEFCONFIG
           echo "CONFIG_KSU_SUSFS_ENABLE_LOG=n" >> $REAL_DEFCONFIG
           
-          # 3. Format the target name for the compiler (e.g., vendor/sweet-perf_defconfig)
           TARGET_DEFCONFIG=$(echo $REAL_DEFCONFIG | sed 's|arch/arm64/configs/||')
           echo "TARGET_DEFCONFIG=$TARGET_DEFCONFIG" >> $GITHUB_ENV
 
@@ -88,11 +85,7 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          
-          # Load the REAL device configuration we found in the previous step
           make O=out ARCH=arm64 CC=clang $TARGET_DEFCONFIG
-          
-          # Build the kernel
           make -j$(nproc) O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
 
       - name: Package Kernel (AnyKernel3)
@@ -101,11 +94,10 @@ jobs:
           cp kernel_source/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
           cd AnyKernel3
           sed -i 's/device.name1=.*/device.name1=sweet/' anykernel.sh
-          sed -i 's/device.name2=.*/device.name2=sweet_pro/' anykernel.sh
-          zip -r ../Vantom-Sweet-Final-Kernel.zip *
+          zip -r ../Vantom-Sweet-Final.zip *
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Vantom-Sweet-Final-Kernel
-          path: Vantom-Sweet-Final-Kernel.zip
+          name: Vantom-Sweet-Final
+          path: Vantom-Sweet-Final.zip
