@@ -1,4 +1,4 @@
-name: Build Vantom Kernel (Final Packaging Fix)
+name: Build Vantom Kernel (Final Master Version)
 on:
   workflow_dispatch:
 
@@ -31,11 +31,9 @@ jobs:
           cp -r susfs_source/kernel_patches/include/linux/* include/linux/
           patch -p1 --forward < susfs_source/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
           
-          # Auto-Fix cmdline.c
           sed -i '1i #include <linux/susfs.h>' fs/proc/cmdline.c
           sed -i '/seq_puts(m, saved_command_line);/i \    #ifdef CONFIG_KSU_SUSFS\n    susfs_modify_cmdline(&saved_command_line);\n    #endif' fs/proc/cmdline.c
           
-          # Auto-Fix task_mmu.c
           sed -i '1i #include <linux/susfs.h>' fs/proc/task_mmu.c
           python3 -c '
           with open("fs/proc/task_mmu.c", "r") as f: lines = f.readlines()
@@ -46,13 +44,13 @@ jobs:
           with open("fs/proc/task_mmu.c", "w") as f: f.writelines(lines)
           '
 
-      - name: Configure Kernel (Enable Kprobes)
+      - name: Configure Kernel (Enable Kprobes & Features)
         run: |
           cd kernel_source
           REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sweet*defconfig" | head -n 1)
           [ -z "$REAL_DEFCONFIG" ] && REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sm6150*defconfig" | head -n 1)
           
-          # Core Features: KSU, SusFS, Fast Charge, and Kprobes
+          # Enable KSU, SusFS, Charging, and Kprobes
           for flag in CONFIG_KSU CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_XIAOMI_LN8000 CONFIG_BQ2597X CONFIG_KPROBES CONFIG_HAVE_KPROBES CONFIG_KPROBE_EVENTS; do
             echo "$flag=y" >> $REAL_DEFCONFIG
           done
@@ -70,27 +68,20 @@ jobs:
           make O=out ARCH=arm64 CC=clang $TARGET_DEFCONFIG
           make -j$(nproc) O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
 
-      - name: Package & Upload
+      - name: Package & Upload (Final Grab)
         run: |
           git clone https://github.com/osm0sis/AnyKernel3.git
           
-          # Smart-Search for the compiled image (Fixes the "No such file" error)
-          cd kernel_source/out/arch/arm64/boot/
-          if [ -f "Image.gz-dtb" ]; then
-              cp Image.gz-dtb ../../../../../AnyKernel3/Image.gz-dtb
-          elif [ -f "Image.gz" ]; then
-              cp Image.gz ../../../../../AnyKernel3/Image.gz-dtb
-          elif [ -f "Image" ]; then
-              cp Image ../../../../../AnyKernel3/Image.gz-dtb
-          else
-              echo "Error: Kernel image not found in $(pwd)"
-              exit 1
-          fi
+          # Move the Kernel
+          find kernel_source/out/arch/arm64/boot/ -name "Image*" -exec cp {} AnyKernel3/Image.gz-dtb \;
           
-          cd ../../../../../AnyKernel3
+          # Move the DTBO (Crucial for hardware stability[cite: 11])
+          find kernel_source/out/arch/arm64/boot/ -name "dtbo.img" -exec cp {} AnyKernel3/dtbo.img \;
+          
+          cd AnyKernel3
           sed -i 's/device.name1=.*/device.name1=sweet/' anykernel.sh
           sed -i 's/device.name2=.*/device.name2=sweet_pro/' anykernel.sh
-          zip -r ../Vantom-Sweet-Kernel.zip *
+          zip -r9 ../Vantom-Sweet-Kernel.zip . -x ".git*"
       
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
