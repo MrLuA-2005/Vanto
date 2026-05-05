@@ -1,4 +1,4 @@
-name: Build Vantom Kernel (Strict Merge Mode)
+name: Build Vantom Kernel (Auto-Fix Patch Mode)
 on:
   workflow_dispatch:
 
@@ -9,41 +9,53 @@ jobs:
       - name: Setup Build Environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential flex git-lfs libssl-dev libelf-dev clang lld llvm curl git zip unzip
+          sudo apt-get install -y bc bison build-essential flex git-lfs libssl-dev libelf-dev clang lld llvm curl git zip unzip patch python3
 
       - name: Clone Vantom Kernel
         run: |
           git clone https://github.com/vantoman/kernel_xiaomi_sm6150.git -b 14 kernel_source
 
-      - name: Integrate KSUN & SusFS (Strict Merge)
+      - name: Integrate KSUN & SusFS (With Auto-Fix)
         run: |
           cd kernel_source
-          
-          # 1. Install KernelSU-Next (Legacy version for 4.14 kernels)
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
-          
-          # 2. Clone SusFS 4.14
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 susfs_source
           cp -r susfs_source/kernel_patches/fs/* fs/
           cp -r susfs_source/kernel_patches/include/linux/* include/linux/
           
-          # 3. Setup Git for Intelligent Merging
-          git config --global user.email "builder@github.actions"
-          git config --global user.name "GitHub Actions"
-          git add .
-          git commit -m "Pre-patch commit"
+          # 1. Apply the patch. We capture the exit code so the script doesn't crash on rejects, allowing us to fix them manually below.
+          patch -p1 --forward < susfs_source/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
           
-          # 4. Apply the patch using 3-Way Merge
-          # This intelligently resolves the line number differences instead of failing or skipping!
-          git apply --3way susfs_source/kernel_patches/50_add_susfs_in_kernel-4.14.patch
+          # 2. AUTO-FIX: Inject missing stealth code into cmdline.c
+          if [ -f "fs/proc/cmdline.c.rej" ]; then
+              echo "Re-patching cmdline.c..."
+              sed -i '1i #include <linux/susfs.h>' fs/proc/cmdline.c
+              sed -i '/seq_puts(m, saved_command_line);/i \t#ifdef CONFIG_KSU_SUSFS\n\tsusfs_modify_cmdline(&saved_command_line);\n\t#endif' fs/proc/cmdline.c
+          fi
+          
+          # 3. AUTO-FIX: Inject missing stealth code into task_mmu.c using Python
+          if [ -f "fs/proc/task_mmu.c.rej" ]; then
+              echo "Re-patching task_mmu.c..."
+              sed -i '1i #include <linux/susfs.h>' fs/proc/task_mmu.c
+              python3 -c '
+          with open("fs/proc/task_mmu.c", "r") as f: lines = f.readlines()
+          for i, line in enumerate(lines):
+              if "static int show_map_vma(" in line:
+                  lines.insert(i+2, "#ifdef CONFIG_KSU_SUSFS\n\tif (vma->vm_file && unlikely(susfs_is_mnt_devname_sus(vma->vm_file))) return 0;\n#endif\n")
+                  break
+          with open("fs/proc/task_mmu.c", "w") as f: f.writelines(lines)
+          '
+          fi
 
       - name: Configure Kernel (LN8000 & Stealth)
         run: |
           cd kernel_source/arch/arm64/configs/vendor/
           
+          # Hardware fix for 33W Fast Charging
           echo "CONFIG_XIAOMI_LN8000=y" >> sweet_user_defconfig
           echo "CONFIG_BQ2597X=y" >> sweet_user_defconfig
           
+          # Manual Mode Stealth Flags
           echo "CONFIG_KSU=y" >> sweet_user_defconfig
           echo "CONFIG_KSU_SUSFS=y" >> sweet_user_defconfig
           echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> sweet_user_defconfig
@@ -65,10 +77,10 @@ jobs:
           cd AnyKernel3
           sed -i 's/device.name1=.*/device.name1=sweet/' anykernel.sh
           sed -i 's/device.name2=.*/device.name2=sweet_pro/' anykernel.sh
-          zip -r ../Vantom-Sweet-Strict-Kernel.zip *
+          zip -r ../Vantom-Sweet-AutoFix-Kernel.zip *
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Vantom-Sweet-Strict-Kernel
-          path: Vantom-Sweet-Strict-Kernel.zip
+          name: Vantom-Sweet-AutoFix-Kernel
+          path: Vantom-Sweet-AutoFix-Kernel.zip
