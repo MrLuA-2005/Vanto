@@ -1,5 +1,4 @@
-name: Build Vantom Kernel Sweet (SusFS & KernelSU-Next)
-
+name: Build Vantom Kernel Final (Fix Error 1 & Fastboot)
 on:
   workflow_dispatch:
 
@@ -7,71 +6,83 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Instalar Dependências
+      - name: Setup Build Environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc build-essential flex bison lld llvm clang libssl-dev libelf-dev git-lfs zip
+          sudo apt-get install -y bc bison build-essential flex git-lfs libssl-dev libelf-dev \
+          clang lld llvm curl git zip unzip patch python3 \
+          gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+          gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
 
-      - name: Clonar Kernel Source (Vantom)
+      - name: Clone Vantom Kernel
         run: |
-          git clone --depth=1 https://github.com/vantoman/kernel_xiaomi_sm6150.git -b 14 kernel_source
+          git clone https://github.com/vantoman/kernel_xiaomi_sm6150.git -b 14 kernel_source
 
-      - name: Integrar KernelSU-Next (Manual e Direto)
+      - name: Integrate KSUN-Next
         run: |
           cd kernel_source
-          # Em vez de script, clonamos diretamente a versão correta
-          git clone https://github.com/rifsasu/KernelSU-Next.git drivers/kernelsu
-          cd drivers/kernelsu
-          git checkout next
-          cd ../..
-          # Adiciona ao Makefile para garantir que compila
+          # Uso de clone direto para evitar erros de link 404 no futuro
+          git clone --depth=1 https://github.com/rifsasu/KernelSU-Next.git -b next drivers/kernelsu
           echo "obj-y += kernelsu/" >> drivers/Makefile
-          echo "KernelSU-Next integrado com sucesso."
 
-      - name: Aplicar SusFS (Arquivos e Patches)
+      - name: Integrate SusFS (Sua lógica original)
         run: |
-          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-5.15 susfs_source
-          # Copiar ficheiros necessários[cite: 1]
-          cp susfs_source/kernel_patches/fs/susfs.c kernel_source/fs/
-          cp susfs_source/kernel_patches/include/linux/susfs.h kernel_source/include/linux/
-          
           cd kernel_source
-          # Aplicar o patch específico para kernels 4.14/5.10[cite: 1]
-          # Usamos o patch de 5.10 como compatível, mas forçamos a aplicação
-          cp ../susfs_source/kernel_patches/5.10/69_add_susfs_in_gki-android14-5.15.patch .
-          patch -p1 < 69_add_susfs_in_gki-android14-5.15.patch || echo "Aviso: Patch aplicado com alguns offsets."
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 susfs_source
+          cp -r susfs_source/kernel_patches/fs/* fs/
+          cp -r susfs_source/kernel_patches/include/linux/* include/linux/
+          patch -p1 --forward < susfs_source/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
+          
+          sed -i '1i #include <linux/susfs.h>' fs/proc/cmdline.c
+          sed -i '/seq_puts(m, saved_command_line);/i \    #ifdef CONFIG_KSU_SUSFS\n    susfs_modify_cmdline(&saved_command_line);\n    #endif' fs/proc/cmdline.c
+          
+          sed -i '1i #include <linux/susfs.h>' fs/proc/task_mmu.c
+          python3 -c '
+          with open("fs/proc/task_mmu.c", "r") as f: lines = f.readlines()
+          for i, line in enumerate(lines):
+              if "static int show_map_vma(" in line:
+                  lines.insert(i+2, "#ifdef CONFIG_KSU_SUSFS\n\tif (vma->vm_file && unlikely(susfs_is_mnt_devname_sus(vma->vm_file))) return 0;\n#endif\n")
+                  break
+          with open("fs/proc/task_mmu.c", "w") as f: f.writelines(lines)
+          '
 
-      - name: Compilar Kernel
+      - name: Configure Kernel
+        run: |
+          cd kernel_source
+          REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sweet*defconfig" | head -n 1)
+          [ -z "$REAL_DEFCONFIG" ] && REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sm6150*defconfig" | head -n 1)
+          
+          for flag in CONFIG_KSU CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_XIAOMI_LN8000 CONFIG_BQ2597X CONFIG_KPROBES CONFIG_HAVE_KPROBES CONFIG_KPROBE_EVENTS; do
+            echo "$flag=y" >> $REAL_DEFCONFIG
+          done
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=n" >> $REAL_DEFCONFIG
+          
+          TARGET_DEFCONFIG=$(echo $REAL_DEFCONFIG | sed 's|arch/arm64/configs/||')
+          echo "TARGET_DEFCONFIG=$TARGET_DEFCONFIG" >> $GITHUB_ENV
+
+      - name: Build Kernel
         run: |
           cd kernel_source
           export ARCH=arm64
-          export SUBARCH=arm64
-          make O=out vendor/sweet_defconfig
-          make -j$(nproc) O=out \
-                      ARCH=arm64 \
-                      CC=clang \
-                      CROSS_COMPILE=aarch64-linux-gnu- \
-                      CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-                      NM=llvm-nm \
-                      OBJCOPY=llvm-objcopy \
-                      OBJDUMP=llvm-objdump \
-                      STRIP=llvm-strip
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          make O=out ARCH=arm64 CC=clang $TARGET_DEFCONFIG
+          make -j$(nproc) O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
 
-      - name: Preparar AnyKernel3 (Cópia fiel do Vantom Funcional)
+      - name: Package Kernel (Cópia fiel do Kernel Funcional)
         run: |
           git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          
+          # 1. Copia os 3 ficheiros essenciais separadamente[cite: 3]
+          find kernel_source/out/arch/arm64/boot/ -name "Image.gz" -exec cp {} AnyKernel3/Image.gz \;
+          find kernel_source/out/arch/arm64/boot/dts/qcom/ -name "*sweet*.dtb" -exec cp {} AnyKernel3/dtb.img \;
+          find kernel_source/out/arch/arm64/boot/ -name "dtbo.img" -exec cp {} AnyKernel3/dtbo.img \;
+          
           cd AnyKernel3
           
-          # Copiar ficheiros separadamente para evitar erro de imagem[cite: 3, 5]
-          find ../kernel_source/out/arch/arm64/boot/ -name "Image.gz" -exec cp {} Image.gz \;
-          find ../kernel_source/out/arch/arm64/boot/dts/qcom/ -name "*sweet*.dtb" -exec cp {} dtb.img \;
-          find ../kernel_source/out/arch/arm64/boot/ -name "dtbo.img" -exec cp {} dtbo.img \;
-
-          # Criar o anykernel.sh que preserva o teu Ramdisk
+          # 2. Escreve o anykernel.sh IDÊNTICO ao do developer que funciona
           cat <<EOF > anykernel.sh
+          # global properties
           properties() { '
           do.devicecheck=1
           do.modules=0
@@ -82,6 +93,7 @@ jobs:
           supported.versions=11-16
           '; }
 
+          # boot shell variables
           BLOCK=/dev/block/bootdevice/by-name/boot;
           IS_SLOT_DEVICE=0;
           RAMDISK_COMPRESSION=auto;
@@ -89,19 +101,16 @@ jobs:
 
           . tools/ak3-core.sh;
 
-          # Vital: Extrai e preserva o ramdisk do Android 16[cite: 6]
+          # dump_boot garante a preservação do Ramdisk do Android 16
           dump_boot;
           write_boot;
           flash_dtbo;
           EOF
 
-      - name: Criar ZIP
-        run: |
-          cd AnyKernel3
-          zip -r9 ../Vantom-SusFS-Final.zip * -x .git README.md *placeholder
-          
-      - name: Upload
+          zip -r9 ../Vantom-Sweet-SusFS-Final.zip . -x ".git*"
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel-Vantom-SusFS
-          path: Vantom-SusFS-Final.zip
+          name: Vantom-Sweet-Kernel
+          path: Vantom-Sweet-SusFS-Final.zip
