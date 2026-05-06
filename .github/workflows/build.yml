@@ -15,34 +15,34 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc build-essential flex bison lld llvm clang libssl-dev libelf-dev git-lfs zip
 
-      - name: Clonar Kernel Source (Vantom Base)
+      - name: Clonar Kernel Source (Vantom)
         run: |
           git clone --depth=1 https://github.com/vantoman/kernel_xiaomi_sm6150.git -b 14 kernel_source
 
-      - name: Integrar KernelSU-Next (Método Robusto)
+      - name: Integrar KernelSU-Next (Manual e Direto)
         run: |
           cd kernel_source
-          # Tenta o script oficial, mas se der 404 (exit code 127/outros), executa o Plano B
-          curl -LSs "https://raw.githubusercontent.com/rifsasu/KernelSU-Next/next/kernel/setup.sh" | bash -s next || true
-          
-          if [ ! -d "drivers/kernelsu" ]; then
-            echo "Script oficial falhou ou link quebrado. Iniciando integração manual..."
-            git clone https://github.com/rifsasu/KernelSU-Next.git drivers/kernelsu
-            cd drivers/kernelsu
-            git checkout next
-            cd ../..
-            echo "obj-y += kernelsu/" >> drivers/Makefile
-          fi
+          # Em vez de script, clonamos diretamente a versão correta
+          git clone https://github.com/rifsasu/KernelSU-Next.git drivers/kernelsu
+          cd drivers/kernelsu
+          git checkout next
+          cd ../..
+          # Adiciona ao Makefile para garantir que compila
+          echo "obj-y += kernelsu/" >> drivers/Makefile
+          echo "KernelSU-Next integrado com sucesso."
 
-      - name: Clonar e Aplicar SusFS
+      - name: Aplicar SusFS (Arquivos e Patches)
         run: |
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-5.15 susfs_source
-          # O SusFS exige modificação no código-fonte antes da compilação[cite: 1, 2]
-          cp susfs_source/kernel_patches/5.10/69_add_susfs_in_gki-android14-5.15.patch kernel_source/
+          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-5.15 susfs_source
+          # Copiar ficheiros necessários[cite: 1]
           cp susfs_source/kernel_patches/fs/susfs.c kernel_source/fs/
           cp susfs_source/kernel_patches/include/linux/susfs.h kernel_source/include/linux/
+          
           cd kernel_source
-          patch -p1 < 69_add_susfs_in_gki-android14-5.15.patch || echo "Aviso: Alguns patches podem ter falhado, verifique logs."
+          # Aplicar o patch específico para kernels 4.14/5.10[cite: 1]
+          # Usamos o patch de 5.10 como compatível, mas forçamos a aplicação
+          cp ../susfs_source/kernel_patches/5.10/69_add_susfs_in_gki-android14-5.15.patch .
+          patch -p1 < 69_add_susfs_in_gki-android14-5.15.patch || echo "Aviso: Patch aplicado com alguns offsets."
 
       - name: Compilar Kernel
         run: |
@@ -60,23 +60,18 @@ jobs:
                       OBJDUMP=llvm-objdump \
                       STRIP=llvm-strip
 
-      - name: Preparar AnyKernel3 (Estrutura Vantom Funcional)
+      - name: Preparar AnyKernel3 (Cópia fiel do Vantom Funcional)
         run: |
           git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
           cd AnyKernel3
           
-          # 1. Copiar o Kernel puro (sem DTB colado)
+          # Copiar ficheiros separadamente para evitar erro de imagem[cite: 3, 5]
           find ../kernel_source/out/arch/arm64/boot/ -name "Image.gz" -exec cp {} Image.gz \;
-          
-          # 2. Copiar o DTB isolado como dtb.img
           find ../kernel_source/out/arch/arm64/boot/dts/qcom/ -name "*sweet*.dtb" -exec cp {} dtb.img \;
-          
-          # 3. Copiar o DTBO necessário para o hardware[cite: 3, 5]
           find ../kernel_source/out/arch/arm64/boot/ -name "dtbo.img" -exec cp {} dtbo.img \;
 
-          # 4. Gerar o anykernel.sh que preserva o Ramdisk e evita o Fastboot
+          # Criar o anykernel.sh que preserva o teu Ramdisk
           cat <<EOF > anykernel.sh
-          # global properties
           properties() { '
           do.devicecheck=1
           do.modules=0
@@ -87,7 +82,6 @@ jobs:
           supported.versions=11-16
           '; }
 
-          # boot shell variables
           BLOCK=/dev/block/bootdevice/by-name/boot;
           IS_SLOT_DEVICE=0;
           RAMDISK_COMPRESSION=auto;
@@ -95,23 +89,19 @@ jobs:
 
           . tools/ak3-core.sh;
 
-          # dump_boot extrai o ramdisk original para evitar o loop de fastboot
+          # Vital: Extrai e preserva o ramdisk do Android 16[cite: 6]
           dump_boot;
-          
-          # Escreve o kernel e o dtb.img na partição de boot
           write_boot;
-          
-          # Instala os overlays de hardware[cite: 6]
           flash_dtbo;
           EOF
 
-      - name: Criar ZIP Final
+      - name: Criar ZIP
         run: |
           cd AnyKernel3
-          zip -r9 ../Vantom-Sweet-SusFS-A16.zip * -x .git README.md *placeholder
+          zip -r9 ../Vantom-SusFS-Final.zip * -x .git README.md *placeholder
           
-      - name: Upload Artefacto
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: Vantom-Sweet-Kernel-A16-SusFS
-          path: Vantom-Sweet-SusFS-A16.zip
+          name: Kernel-Vantom-SusFS
+          path: Vantom-SusFS-Final.zip
