@@ -23,7 +23,7 @@ jobs:
           cd kernel_source
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
 
-      - name: Integrate SusFS (With Auto-Fix)
+      - name: Integrate SusFS (v2.1.1 Legacy)
         run: |
           cd kernel_source
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 susfs_source
@@ -31,9 +31,11 @@ jobs:
           cp -r susfs_source/kernel_patches/include/linux/* include/linux/
           patch -p1 --forward < susfs_source/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
           
+          # Fix for cmdline.c
           sed -i '1i #include <linux/susfs.h>' fs/proc/cmdline.c
           sed -i '/seq_puts(m, saved_command_line);/i \    #ifdef CONFIG_KSU_SUSFS\n    susfs_modify_cmdline(&saved_command_line);\n    #endif' fs/proc/cmdline.c
           
+          # Fix for task_mmu.c (Critical for Android 16 integrity)
           sed -i '1i #include <linux/susfs.h>' fs/proc/task_mmu.c
           python3 -c '
           with open("fs/proc/task_mmu.c", "r") as f: lines = f.readlines()
@@ -44,13 +46,13 @@ jobs:
           with open("fs/proc/task_mmu.c", "w") as f: f.writelines(lines)
           '
 
-      - name: Configure Kernel (Enable Kprobes & Features)
+      - name: Configure Kernel (Kprobes & Fast Charge)
         run: |
           cd kernel_source
           REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sweet*defconfig" | head -n 1)
           [ -z "$REAL_DEFCONFIG" ] && REAL_DEFCONFIG=$(find arch/arm64/configs -name "*sm6150*defconfig" | head -n 1)
           
-          # Enable KSU, SusFS, Charging, and Kprobes
+          # Enable KSU, SusFS, Kprobes, and Xiaomi Charging
           for flag in CONFIG_KSU CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_XIAOMI_LN8000 CONFIG_BQ2597X CONFIG_KPROBES CONFIG_HAVE_KPROBES CONFIG_KPROBE_EVENTS; do
             echo "$flag=y" >> $REAL_DEFCONFIG
           done
@@ -59,7 +61,7 @@ jobs:
           TARGET_DEFCONFIG=$(echo $REAL_DEFCONFIG | sed 's|arch/arm64/configs/||')
           echo "TARGET_DEFCONFIG=$TARGET_DEFCONFIG" >> $GITHUB_ENV
 
-      - name: Build Kernel
+      - name: Build Kernel (Clang/LLVM)
         run: |
           cd kernel_source
           export ARCH=arm64
@@ -68,23 +70,28 @@ jobs:
           make O=out ARCH=arm64 CC=clang $TARGET_DEFCONFIG
           make -j$(nproc) O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
 
-      - name: Package & Upload (Final Grab)
+      - name: Package & Upload (Block Path Fix)
         run: |
           git clone https://github.com/osm0sis/AnyKernel3.git
           
-          # Move the Kernel
+          # Grab Kernel and DTBO
           find kernel_source/out/arch/arm64/boot/ -name "Image*" -exec cp {} AnyKernel3/Image.gz-dtb \;
-          
-          # Move the DTBO (Crucial for hardware stability[cite: 11])
           find kernel_source/out/arch/arm64/boot/ -name "dtbo.img" -exec cp {} AnyKernel3/dtbo.img \;
           
           cd AnyKernel3
+          # Set Sweet Identity
           sed -i 's/device.name1=.*/device.name1=sweet/' anykernel.sh
           sed -i 's/device.name2=.*/device.name2=sweet_pro/' anykernel.sh
+          
+          # FIX: Solve the "omap" error by targeting the Qualcomm by-name path
+          sed -i 's|block=.*|block=/dev/block/by-name/boot;|' anykernel.sh
+          sed -i 's|# dtbo_block=.*|dtbo_block=/dev/block/by-name/dtbo;|' anykernel.sh
+          
+          # Create final zip
           zip -r9 ../Vantom-Sweet-Kernel.zip . -x ".git*"
       
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: uses: actions/upload-artifact@v4
         with:
           name: Vantom-Sweet-Kernel
           path: Vantom-Sweet-Kernel.zip
